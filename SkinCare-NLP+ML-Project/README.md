@@ -2,4 +2,4 @@ The project focuses on analyzing Amazon reviews of skincare products to develop 
 
 lasso_model.html contains the analysis conducted in R -> In order to correctly visualize it, you can access it here: 
 
-main_research_code.html contains the majority of the analysis as well as the recommendation system algorithm built in Python -> In order to correctly visualize it, you can access it here:
+main_research_code.html contains the majority of the analysis as well as the recommendation system algorithm built in Python -> In order to correctly visualize it, you can access it here: https://htmlpreview.github.io/?https://github.com/anar39/NLP-Projects/blob/main/SkinCare-NLP%2BML-Project/main_research_code.html#4.2
