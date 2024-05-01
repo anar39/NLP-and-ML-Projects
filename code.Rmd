@@ -1,0 +1,898 @@
+---
+title: "Text Analysis for Business - Final Essay"
+author: "Ana Rodrigo de Pablo - CID:02490419"
+output: html_notebook
+---
+
+```{r}
+library(quanteda)
+library(ggrepel)
+library(textclean)
+library(tidyverse)
+library(glmnet)
+library(sentimentr)
+library(spacyr) 
+library(politeness)
+library(ggplot2)
+library(stringr)
+library(tm)
+library(knitr)
+library(stm)
+```
+
+```{r}
+source("TAB_dfm.R")
+source("kendall_acc.R")
+source("vectorFunctions.R")
+vdat<-readRDS("function_vdat.rds")
+data_dfm_train<-readRDS("function_data_dfm_train.rds")
+data_dfm_test<-readRDS("function_data_dfm_test.rds")
+lsims<-readRDS("function_lsims.rds")
+data_dfm_train_Q<-readRDS("function_data_dfm_train_Q.rds")
+data_dfm_test_Q<-readRDS("function_data_dfm_test_Q.rds")
+data_dfm_train_A<-readRDS("function_data_dfm_train_A.rds")
+data_dfm_test_A<-readRDS("function_data_dfm_test_A.rds")
+data_model_new_Q<-readRDS("function_data_model_new_Q.rds")
+data_model_new_A<-readRDS("function_data_model_new_A.rds")
+data_dfm_train_A_tri<-readRDS("function_data_dfm_train_A_tri.rds")
+data_dfm_test_A_tri<-readRDS("function_data_dfm_test_A_tri.rds")
+data_model_A_tri<-readRDS("function_data_model_A_tri.rds")
+politeness<-readRDS("function_politeness.rds")
+lasso_model_polit<-readRDS("function_lasso_model_polit.rds")
+```
+
+*PART A*
+
+**Question 1:**
+
+```{r}
+# Load files
+ecMain<-readRDS("earningsDat.RDS")
+ecQA<-readRDS("earningsQandA.RDS") %>%
+  mutate(wordcount=str_count(text,"[[:alpha:]]+"))
+
+# Split data into training and test sets
+training_data <- ecMain %>%
+  filter(FY < 2012)
+
+test_data <- ecMain %>%
+  filter(FY == 2012)
+```
+
+**Question 2:**
+
+```{r}
+# LASSO model using only bigrams and trigrams
+data_dfm_train <- TAB_dfm(training_data$opening_speech, ngrams = 2:3)
+data_dfm_test <- TAB_dfm(test_data$opening_speech, ngrams = 2:3, min.prop=0) %>%
+  dfm_match(colnames(data_dfm_train))
+
+data_model<-glmnet::cv.glmnet(x=data_dfm_train %>%
+                               as.matrix(),y=training_data$EPS_actual)
+
+plot_data_model <- plot(data_model)
+
+saveRDS(data_dfm_train, "function_data_dfm_train.rds")
+saveRDS(data_dfm_test, "function_data_dfm_test.rds")
+```
+
+```{r, fig.width=13, fig.height=8, message=FALSE, warning=FALSE}
+# Coefficients plot
+plotDat <- data_model %>%
+  coef(s="lambda.min") %>%
+  drop() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ngram") %>%
+  rename(score = ".") %>%
+  filter(score != 0 & ngram != "(Intercept)" & !is.na(score))  %>%
+  left_join(data.frame(ngram = colnames(data_dfm_train),
+                       freq = colMeans(data_dfm_train)))
+
+plotDat %>%
+  mutate_at(vars(score, freq), ~round(., 3)) %>%
+  ggplot(aes(x = score, y = freq, label = ngram, color = score)) +
+  scale_color_gradient(low = "red", high = "green") +
+  geom_vline(xintercept = 0) +
+  geom_point() +
+  geom_label_repel(max.overlaps = 45, force = 6) +  
+  scale_y_continuous(trans = "log2", breaks = c(-5, 0.01, 0.05, 0.1, 0.2, 0.5, 1, 2, 5)) +
+  scale_x_continuous(limits = c(-0.4, 0.4)) +
+  theme_bw() +
+  labs(x = "Coefficient in Model", y = "Uses per Opening Speech") +
+  theme(legend.position = "none",
+        axis.title = element_text(size = 15),
+        axis.text = element_text(size = 15))
+```
+
+**Question 3:**
+
+```{r}
+vecSmall<-readRDS("vecSmall.RDS")
+load("wfFile.RData")
+
+# project data to embedding space
+vdat<-vecCheck(ecMain$opening_speech,
+               vecSmall,
+               wfFile,
+               PCAtrim=1)
+
+saveRDS(vdat, "function_vdat.rds")
+
+fy <- ecMain$FY
+vdat_training_data <- vdat[fy < 2012, ]
+vdat_test_data <- vdat[fy == 2012, ]
+```
+
+```{r}
+# LASSO model using the word2vec embeddings
+lasso_word2vec<-glmnet::cv.glmnet(x=vdat_training_data,
+                             y=training_data$EPS_actual)
+plot(lasso_word2vec)
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Model that combines vector embeddings + ngrams
+combined_x_train=cbind(vdat_training_data,data_dfm_train)
+combined_x_test=cbind(vdat_test_data,data_dfm_test)
+
+lasso_all<-glmnet::cv.glmnet(x=combined_x_train,
+                             y=training_data$EPS_actual)
+
+plot(lasso_all)
+```
+
+```{r}
+#Accuracies for the three models
+test_dfm_predict<-predict(data_model,
+                          newx = data_dfm_test,
+                          s="lambda.min")
+model_1 <- kendall_acc(test_dfm_predict,test_data$EPS_actual)
+
+test_vec_predict<-predict(lasso_word2vec,
+                          newx = vdat_test_data,
+                          s="lambda.min")
+model_2 <- kendall_acc(test_vec_predict,test_data$EPS_actual)
+
+test_all_predict<-predict(lasso_all,
+                          newx = combined_x_test,
+                          s="lambda.min")
+model_3 <- kendall_acc(test_all_predict,test_data$EPS_actual)
+
+model_1
+model_2
+model_3
+```
+
+**Question 4:**
+
+```{r}
+# Benchmarks 
+
+# Linear regression of wordcount and EPS
+training_data$wordcount <- str_count(training_data$opening_speech, "\\w+")
+test_data$wordcount <- str_count(test_data$opening_speech, "\\w+")
+
+wdct <- lm(EPS_actual ~ wordcount, data = training_data)
+wordcount_pred <- predict(wdct, newdata = test_data)
+
+acc_wdct <- kendall_acc(test_data$EPS_actual, wordcount_pred)
+
+# Random guess
+set.seed(88)
+min_value <- min(training_data$EPS_actual)
+max_value <- max(training_data$EPS_actual)
+
+num_predictions <- length(test_data$EPS_actual)
+random_guess <- runif(num_predictions, min = min_value, max = max_value)
+
+acc_random<-kendall_acc(test_data$EPS_actual,random_guess)
+
+acc_wdct
+acc_random
+```
+
+```{r}
+# Combine accuracy estimates for a plot
+accuracy_plot <- bind_rows(
+  model_1 %>% mutate(field = "Ngrams"),
+  model_2 %>% mutate(field = "Embeddings"),
+  model_3 %>% mutate(field = "Ngrams & Embeddings"),
+  acc_wdct %>% mutate(field = "Wordcount Benchmark"),
+  acc_random %>% mutate(field = "Random Benchmark")) %>%
+  ggplot(aes(x=field,color=field,y=acc,ymin=lower,ymax=upper)) +
+  geom_point() +
+  geom_errorbar(width=.4) +
+  theme_bw() +
+  labs(x="Model",y="Accuracy") +
+  geom_hline(yintercept = 50, linetype = "dashed") +
+  ggtitle("Average Accuracy of the First Three Models and Benchmarks") +
+  theme(axis.text = element_text(size=8),
+        axis.title = element_text(size=10),
+        panel.grid=element_blank(),
+        legend.position="none",
+        plot.title = element_text(hjust = 0.5)) +
+  scale_y_continuous(breaks = seq(40, 75, by = 5), limits = c(40, 75))
+
+accuracy_plot
+```
+**Question 5:**
+
+```{r, message=FALSE, warning=FALSE}
+# store predictions in data
+# test_dfm_predict contains predictions from the ngrams-only model
+test_data <- test_data %>%
+  mutate(ngrams_prediction = test_dfm_predict,
+         ngrams_error = abs(EPS_actual - test_dfm_predict),
+         ngrams_bias = EPS_actual - test_dfm_predict)
+
+# test_vec_predict contains predictions from the word2vec-only model
+test_data <- test_data %>%
+  mutate(word2vec_prediction = test_vec_predict,
+         word2vec_error = abs(EPS_actual - test_vec_predict),
+         word2vec_bias = EPS_actual - test_vec_predict)
+
+# Filter examples where EPS_actual was high
+high_eps_actual <- test_data %>%
+  filter(EPS_actual > 4.9)
+
+# Filter examples where word2vec prediction was close and EPS_actual high
+close_word2vec_high_eps <- high_eps_actual %>%
+  filter(ngrams_error > 4.0 & word2vec_error < 3.6)
+
+# Filter examples where EPS_actual was low
+low_eps_actual <- test_data %>%
+  filter(EPS_actual < 3.0)
+
+# Filter examples where word2vec prediction was close and EPS_actual low
+close_word2vec_low_eps <- low_eps_actual %>%
+  filter(ngrams_error > 2.5 & word2vec_error < 1.0)
+```
+
+**Question 6:**
+
+```{r}
+### Distributed Dictionary
+# extract dictionary as document
+positive_dict<-textdata::lexicon_loughran() %>%
+  filter(sentiment=="positive") %>%
+  pull(word) %>%
+  paste(collapse=" ")
+
+# calculate similarities to dictionary "document"
+lsims<-vecSimCalc(x=training_data$opening_speech,
+                  y=positive_dict,
+                  vecfile=vecSmall,
+                  wffile = wfFile,
+                  PCAtrim=1)
+
+saveRDS(lsims, "function_lsims.rds")
+
+# add the similarity scores to the data.frame
+training_data$positive_sim<-lsims
+
+# estimate accuracy
+dictionary <- kendall_acc(lsims,training_data$EPS_actual)
+dictionary
+
+### Traditional Dictionary
+loughran_words<-textdata::lexicon_loughran()
+
+positive_dict2<-dictionary(list(
+  loughran_positive=loughran_words %>%
+    filter(sentiment=="positive") %>%
+    pull(word)))
+
+# Traditional dictionary approach using dfm_lookup()
+small_train_dicts<-training_data %>%
+  pull(opening_speech) %>%
+  tokens() %>%
+  dfm() %>%
+  dfm_lookup(positive_dict2) %>%
+  convert(to="data.frame")
+
+# Accuracy score using traditional dictionary
+traditional <- kendall_acc(small_train_dicts$loughran_positive,training_data$EPS_actual)
+traditional
+
+# Combine accuracy estimates for a plot
+accuracy_plot2 <- bind_rows(
+  acc_wdct %>% mutate(field = "Wordcount Benchmark"),
+  acc_random %>% mutate(field = "Random Benchmark"),
+  dictionary %>% mutate(field = "DDR"),
+  traditional %>% mutate(field = "Traditional Dictionary")) %>%
+  ggplot(aes(x=field,color=field,y=acc,ymin=lower,ymax=upper)) +
+  geom_point() +
+  geom_errorbar(width=.4) +
+  theme_bw() +
+  labs(x="Model",y="Accuracy") +
+  geom_hline(yintercept = 50, linetype = "dashed") +
+  ggtitle("Average Accuracy of the Benchmarks and Dictionaries") +
+  theme(axis.text = element_text(size=8),
+        axis.title = element_text(size=10),
+        panel.grid=element_blank(),
+        legend.position="none",
+        plot.title = element_text(hjust = 0.5)) +
+  scale_y_continuous(breaks = seq(40, 75, by = 5), limits = c(40, 75))
+
+accuracy_plot2
+```
+
+**Question 7:**
+
+```{r}
+### Step 1
+# Create a new column combining FY and FQ
+ecMain <- ecMain %>%
+  mutate(FY_FQ = paste(FY, FQ, sep = "-"))
+  
+# Filter dataset to include only FY 2011 and FY 2012
+filtered_data <- ecMain %>%
+  filter(FY %in% c(2011, 2012))
+
+# Group by IBES_ID and count unique fiscal years + quarters
+company_counts <- filtered_data %>%
+  group_by(IBES_ID) %>%
+  summarize(entries = n_distinct(FY_FQ))
+
+# Merge the company_counts dataframe with the filtered_data dataframe
+filtered_data <- filtered_data %>%
+  left_join(company_counts, by = "IBES_ID")
+
+# Filter for companies with entries for all four quarters of both FY 2011 and FY 2012
+target_companies <- filtered_data %>%
+  filter(entries == 8)
+
+### Step 2
+# Extract the speeches for Q1-2011 for these companies
+Q1_2011_speeches <- target_companies %>%
+  filter(FY_FQ == '2011-1') %>%
+  select(IBES_ID, opening_speech)
+
+### Step 3
+# Left join the extracted Q1-2011 speeches back into the original dataset
+joined_data <- left_join(target_companies, Q1_2011_speeches, by = "IBES_ID") %>%
+               rename(opening_speech_2011_Q1 = opening_speech.y) %>%
+               rename(opening_speech = opening_speech.x)
+
+# Now I have a dataset with Q1-2011 speeches joined into the original dataset for the 448 companies.
+```
+
+```{r}
+# Calculate similarity of each speech to its matching first speech
+sim <- numeric(nrow(joined_data))
+
+for (i in 1:nrow(joined_data)) {
+  sim[i] <- vecSimCalc(x = joined_data$opening_speech[i],
+                  y = joined_data$opening_speech_2011_Q1[i],
+                  vecfile = vecSmall,
+                  wffile=wfFile)}
+
+joined_data$sim_score<-sim
+
+# Calculate average similarity score for each quarter
+avg_sim <- joined_data %>%
+  filter(FY_FQ != "2011-1") %>%
+  group_by(FY_FQ) %>%
+  summarise(avg_sim = mean(sim_score, na.rm = TRUE))
+
+# Plot the average similarity score
+ggplot(avg_sim, aes(x = FY_FQ, y = avg_sim)) +
+  geom_line(group = 1, color="blue") +
+  geom_point() +
+  labs(title = "Average Similarity Score from 2011-2 to 2012-4",
+       x = "Quarter",
+       y = "Average Similarity Score") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+**Question 8:**
+
+```{r, message=FALSE, warning=FALSE}
+# Filter to select only rows where asker is 1
+only_askers <- ecQA %>%
+  filter(asker == 1)
+
+# Group by callID and askerID, and count the number of rows for each group
+askers_questions <- only_askers %>%
+  group_by(callID, askerID) %>%
+  summarize(askerQs = first(askerQs))
+
+# Filter to include only the first 20 askers in each call
+asker_summary <- askers_questions %>%
+  filter(as.numeric(askerID) <= 20)
+
+# Plot the relationship between asker order and the number of questions they ask
+ggplot(asker_summary, aes(x = as.integer(askerID), y = askerQs)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +  # Add a linear regression line
+  labs(x = "Asker Order", y = "Number of Questions Asked") +
+  ggtitle("Relationship Between Asker Order and Number of Questions Asked") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+**Question 9:**
+
+```{r}
+# Merge turn-level data into conversation-level data for questions
+qa_questions <- ecQA %>%
+  filter(asker == 1) %>%
+  group_by(callID) %>%
+  summarize(questions = paste(text[1:10], collapse = " "))
+
+# Merge turn-level data into conversation-level data for answers
+qa_answers <- ecQA %>%
+  filter(asker != 1) %>%
+  group_by(callID) %>%
+  summarize(answers = paste(text[1:10], collapse = " "))
+
+# Merge questions and answers datasets with earnings
+merge_all <- ecMain %>%
+  left_join(qa_questions, by = "callID") %>%
+  left_join(qa_answers, by = "callID")
+
+# LASSO model 
+# Split data into training and test sets
+training_data_2 <- merge_all %>%
+  filter(FY < 2012)
+
+test_data_2 <- merge_all %>%
+  filter(FY == 2012)
+
+# LASSO model using unigrams & bigrams for QUESTIONS
+data_dfm_train_Q <- TAB_dfm(training_data_2$questions, ngrams = 1:2)
+data_dfm_test_Q <- TAB_dfm(test_data_2$questions, ngrams = 1:2, min.prop=0) %>%
+  dfm_match(colnames(data_dfm_train_Q))
+
+data_model_new_Q <- glmnet::cv.glmnet(x=data_dfm_train_Q %>%
+                               as.matrix(),y=training_data_2$EPS_actual)
+
+plot_data_model_Q <- plot(data_model_new_Q)
+
+# LASSO model using unigrams & bigrams for ANSWERS
+data_dfm_train_A <- TAB_dfm(training_data_2$answers, ngrams = 1:2)
+data_dfm_test_A <- TAB_dfm(test_data_2$answers, ngrams = 1:2, min.prop=0) %>%
+  dfm_match(colnames(data_dfm_train_A))
+
+data_model_new_A <- glmnet::cv.glmnet(x=data_dfm_train_A %>%
+                               as.matrix(),y=training_data_2$EPS_actual)
+
+plot_data_model_A <- plot(data_model_new_A)
+
+saveRDS(data_dfm_train_Q, "function_data_dfm_train_Q.rds")
+saveRDS(data_dfm_test_Q, "function_data_dfm_test_Q.rds")
+saveRDS(data_dfm_train_A, "function_data_dfm_train_A.rds")
+saveRDS(data_dfm_test_A, "function_data_dfm_test_A.rds")
+saveRDS(data_model_new_Q, "function_data_model_new_Q.rds")
+saveRDS(data_model_new_A, "function_data_model_new_A.rds")
+```
+
+```{r, fig.width=10, fig.height=6, message=FALSE, warning=FALSE}
+# Coefficients plot
+plotDat2Q <- data_model_new_Q %>%
+  coef(s="lambda.min") %>%
+  drop() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ngram") %>%
+  rename(score = ".") %>%
+  filter(score != 0 & ngram != "(Intercept)" & !is.na(score))  %>%
+  left_join(data.frame(ngram = colnames(data_dfm_train_Q),
+                       freq = colMeans(data_dfm_train_Q)))
+
+plotDat2Q %>%
+  mutate_at(vars(score, freq), ~round(., 3)) %>%
+  ggplot(aes(x = score, y = freq, label = ngram, color = score)) +
+  scale_color_gradient(low = "red", high = "green") +
+  geom_vline(xintercept = 0) +
+  geom_point() +
+  geom_label_repel(max.overlaps = 45, force = 6) +  
+  scale_y_continuous(trans = "log2", breaks = c(-5, 0.01, 0.05, 0.1, 0.2, 0.5, 1, 2)) +
+  scale_x_continuous(limits = c(-0.3, 0.3)) +
+  theme_bw() +
+  labs(x = "Coefficient in Questions Model", y = "Uses per Question") +
+  theme(legend.position = "none",
+        axis.title = element_text(size = 15),
+        axis.text = element_text(size = 15))
+```
+
+```{r, fig.width=10, fig.height=6, message=FALSE, warning=FALSE}
+# Coefficients plot
+plotDat2A <- data_model_new_A %>%
+  coef(s="lambda.min") %>%
+  drop() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ngram") %>%
+  rename(score = ".") %>%
+  filter(score != 0 & ngram != "(Intercept)" & !is.na(score))  %>%
+  left_join(data.frame(ngram = colnames(data_dfm_train_A),
+                       freq = colMeans(data_dfm_train_A)))
+
+plotDat2A %>%
+  mutate_at(vars(score, freq), ~round(., 3)) %>%
+  ggplot(aes(x = score, y = freq, label = ngram, color = score)) +
+  scale_color_gradient(low = "red", high = "green") +
+  geom_vline(xintercept = 0) +
+  geom_point() +
+  geom_label_repel(max.overlaps = 45, force = 6) +  
+  scale_y_continuous(trans = "log2", breaks = c(-5, 0.01, 0.05, 0.1, 0.2, 0.5, 1, 2)) +
+  scale_x_continuous(limits = c(-0.35, 0.35)) +
+  theme_bw() +
+  labs(x = "Coefficient in Answers Model", y = "Uses per Answer") +
+  theme(legend.position = "none",
+        axis.title = element_text(size = 15),
+        axis.text = element_text(size = 15))
+```
+
+**Question 10:**
+
+```{r}
+# LASSO model using bigrams and trigrams for ANSWERS
+data_dfm_train_A_tri <- TAB_dfm(training_data_2$answers, ngrams = 2:3)
+data_dfm_test_A_tri <- TAB_dfm(test_data_2$answers, ngrams = 2:3, min.prop=0) %>%
+  dfm_match(colnames(data_dfm_train_A_tri))
+
+data_model_A_tri <- glmnet::cv.glmnet(x=data_dfm_train_A_tri %>%
+                               as.matrix(),y=training_data_2$EPS_actual)
+
+plot_data_model_A_tri <- plot(data_model_A_tri)
+
+saveRDS(data_dfm_train_A_tri, "function_data_dfm_train_A_tri.rds")
+saveRDS(data_dfm_test_A_tri, "function_data_dfm_test_A_tri.rds")
+saveRDS(data_model_A_tri, "function_data_model_A_tri.rds")
+```
+
+```{r, fig.width=10, fig.height=6, message=FALSE, warning=FALSE}
+# Coefficients plot
+plotDat3A <- data_model_A_tri %>%
+  coef(s="lambda.min") %>%
+  drop() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ngram") %>%
+  rename(score = ".") %>%
+  filter(score != 0 & ngram != "(Intercept)" & !is.na(score))  %>%
+  left_join(data.frame(ngram = colnames(data_dfm_train_A_tri),
+                       freq = colMeans(data_dfm_train_A_tri)))
+
+plotDat3A %>%
+  mutate_at(vars(score, freq), ~round(., 3)) %>%
+  ggplot(aes(x = score, y = freq, label = ngram, color = score)) +
+  scale_color_gradient(low = "red", high = "green") +
+  geom_vline(xintercept = 0) +
+  geom_point() +
+  geom_label_repel(max.overlaps = 45, force = 6) +  
+  scale_y_continuous(trans = "log2", breaks = c(-5, 0.01, 0.05, 0.1, 0.2, 0.5, 1, 2)) +
+  scale_x_continuous(limits = c(-0.4, 0.4)) +
+  theme_bw() +
+  labs(x = "Coefficient in Bigrams & Trigrams Answers Model", y = "Uses per Answer") +
+  theme(legend.position = "none",
+        axis.title = element_text(size = 15),
+        axis.text = element_text(size = 15))
+```
+
+```{r}
+#Accuracies for the three models
+test_dfm_predict_Q<-predict(data_model_new_Q,
+                          newx = data_dfm_test_Q,
+                          s="lambda.min")
+model_4 <- kendall_acc(test_dfm_predict_Q,test_data_2$EPS_actual)
+
+test_dfm_predict_A<-predict(data_model_new_A,
+                          newx = data_dfm_test_A,
+                          s="lambda.min")
+model_5 <- kendall_acc(test_dfm_predict_A,test_data_2$EPS_actual)
+
+test_dfm_predict_A_tri<-predict(data_model_A_tri,
+                          newx = data_dfm_test_A_tri,
+                          s="lambda.min")
+model_6 <- kendall_acc(test_dfm_predict_A_tri,test_data_2$EPS_actual)
+
+model_4
+model_5
+model_6
+```
+
+```{r}
+# Benchmarks 
+
+# Benchmark 1 - Linear regression of QUESTIONS wordcount 
+training_data_2$wordcount_q <- str_count(training_data_2$questions, "\\w+")
+test_data_2$wordcount_q <- str_count(test_data_2$questions, "\\w+")
+
+wdct_questions <- lm(EPS_actual ~ wordcount_q, data = training_data_2)
+wordcount_pred_questions <- predict(wdct_questions, newdata = test_data_2)
+
+acc_wdct_questions <- kendall_acc(test_data_2$EPS_actual, wordcount_pred_questions)
+
+# Benchmark 2 - Linear regression of ANSWERS wordcount 
+training_data_2$wordcount_a <- str_count(training_data_2$answers, "\\w+")
+test_data_2$wordcount_a <- str_count(test_data_2$answers, "\\w+")
+
+wdct_answers <- lm(EPS_actual ~ wordcount_a, data = training_data_2)
+wordcount_pred_answers <- predict(wdct_answers, newdata = test_data_2)
+
+acc_wdct_answers <- kendall_acc(test_data_2$EPS_actual, wordcount_pred_answers)
+
+# Benchmark 3 - Random guess
+set.seed(65)
+min_value_2 <- min(training_data_2$EPS_actual)
+max_value_2 <- max(training_data_2$EPS_actual)
+
+num_predictions_2 <- length(test_data_2$EPS_actual)
+random_guess_2 <- runif(num_predictions_2, min = min_value_2, max = max_value_2)
+
+acc_random_2<-kendall_acc(test_data_2$EPS_actual,random_guess_2)
+
+acc_wdct_questions
+acc_wdct_answers
+acc_random_2
+```
+
+```{r, fig.width=10}
+# Combine accuracy estimates for a plot
+accuracy_plot_2 <- bind_rows(
+  model_4 %>% mutate(field = "Unigrams & Bigrams Qs"),
+  model_5 %>% mutate(field = "Unigrams & Bigrams As"),
+  model_6 %>% mutate(field = "Bigrams & Trigrams As"),
+  acc_wdct_questions %>% mutate(field = "Wordcount Qs"),
+  acc_wdct_answers %>% mutate(field = "Wordcount As"),
+  acc_random_2 %>% mutate(field = "Random Guess")) %>%
+  ggplot(aes(x=field,color=field,y=acc,ymin=lower,ymax=upper)) +
+  geom_point() +
+  geom_errorbar(width=.4) +
+  theme_bw() +
+  labs(x="Model",y="Accuracy") +
+  geom_hline(yintercept = 50, linetype = "dashed") +
+  ggtitle("Average Accuracy of the Three Models and Three Benchmarks") +
+  theme(axis.text = element_text(size=8),
+        axis.title = element_text(size=10),
+        panel.grid=element_blank(),
+        legend.position="none",
+        plot.title = element_text(hjust = 0.5)) +
+  scale_y_continuous(breaks = seq(40, 75, by = 5), limits = c(40, 75))
+
+accuracy_plot_2
+```
+
+**Question 11:**
+
+```{r, fig.width=10, fig.height=10, message=FALSE, warning=FALSE}
+# Pre-process data
+ecQA$question <- as.numeric(ecQA$question)
+filter_10 = ecQA %>% filter(question < 11)
+filter_10 = left_join(filter_10, select(ecMain, callID, FY), by = "callID")
+
+# Split in train and test set
+filter_10_train = filter_10%>% 
+  filter(FY<2012)
+filter_10_test = filter_10%>% 
+  filter(FY==2012)
+
+# Politeness plot
+politeness<-politeness(training_data_2$questions, parser="spacy", drop_blank = 0.1)
+saveRDS(politeness, "function_politeness.rds")
+
+politness_plot <- politenessPlot(politeness,
+                               split = filter_10_train$asker,
+                               split_levels = c("Questions", "Answers"),
+                               split_name = "Condition",
+                               top_title = "Feature Difference in the Question Text and Answer Text",
+                               middle_out = 0.05,
+                               drop_blank = 0.1)
+politness_plot
+
+features <- as.matrix(politeness)
+outcome <- as.numeric(filter_10_train$asker)
+
+# Train lasso model to predict whether a turn is a question or an answer using the politeness features
+lasso_model_polit <- glmnet::cv.glmnet(features, outcome, family = "binomial", alpha = 1)
+model_politness<-plot(lasso_model_polit)
+saveRDS(lasso_model_polit, "function_lasso_model_polit.rds")
+
+# Predicting Question or Answer on Politeness Features
+# Coefficients plot
+plotPolitLaso <- lasso_model_polit %>%
+  coef(s="lambda.min") %>%
+  drop() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ngram") %>%
+  rename(score = ".") %>%
+  filter(score != 0 & ngram != "(Intercept)" & !is.na(score))  %>%
+  left_join(data.frame(ngram = colnames(features),
+                       freq = colMeans(features)))
+
+plotPolitLaso %>%
+  mutate_at(vars(score, freq), ~round(., 3)) %>%
+  ggplot(aes(x = score, y = freq, label = ngram, color = score)) +
+  scale_color_gradient(low = "red", high = "green") +
+  geom_vline(xintercept = 0) +
+  geom_point() +
+  geom_label_repel(max.overlaps = 45, force = 6) +  
+  scale_y_continuous(trans = "log2", breaks = c(-5, 0.01, 0.05, 0.1, 0.2, 0.5, 1, 2, 4, 9)) +
+  scale_x_continuous(limits = c(-5, 5)) +
+  theme_bw() +
+  labs(x = "Coefficient", y = "Feature Frequency") +
+  theme(legend.position = "none",
+        axis.title = element_text(size = 15),
+        axis.text = element_text(size = 15))
+```
+
+**Question 12:**
+
+```{r, fig.width=10, fig.height=8, message=FALSE, warning=FALSE}
+# Merge conversation-level data with turn-level data
+# Use only the first five questions in each call
+merged_data_2 <- left_join(ecQA, select(ecMain, callID, FY, FQ), by = "callID")
+
+merged_data_train = merged_data_2 %>%
+  filter(FY < 2012 & question < 6 & asker==0) %>%
+  mutate(FQ_binary = ifelse(FQ == 1, 1, 0))
+
+merged_data_test = merged_data_2 %>%
+  filter(FY == 2012 & question < 6 & asker==0) %>%
+  mutate(FQ_binary = ifelse(FQ == 1, 1, 0))
+
+# Train LASSO model
+merged_data_train_dfm = TAB_dfm(merged_data_train$text,ngrams=1:2) 
+merged_data_test_dfm = TAB_dfm(merged_data_test$text,ngrams=1:2) %>%
+  dfm_match(colnames(merged_data_train_dfm))
+
+lasso_model_merge<-glmnet::cv.glmnet(x=merged_data_train_dfm, y=merged_data_train$FQ_binary, alpha = 1)
+plot(lasso_model_merge)
+
+pred<-predict(lasso_model_merge, newx=merged_data_test_dfm, s="lambda.min")
+accuracy_1<-kendall_acc(pred, merged_data_test$FQ_binary)
+accuracy_1
+
+# Coefficient plot
+plotQ12 <- lasso_model_merge %>%
+  coef(s="lambda.min") %>%
+  drop() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ngram") %>%
+  rename(score = ".") %>%
+  filter(score != 0 & ngram != "(Intercept)" & !is.na(score))  %>%
+  left_join(data.frame(ngram = colnames(merged_data_train_dfm),
+                       freq = colMeans(merged_data_train_dfm)))
+
+plotQ12 %>%
+  mutate_at(vars(score, freq), ~round(., 3)) %>%
+  ggplot(aes(x = score, y = freq, label = ngram, color = score)) +
+  scale_color_gradient(low = "red", high = "green") +
+  geom_vline(xintercept = 0) +
+  geom_point() +
+  geom_label_repel(max.overlaps = 45, force = 6) +  
+  scale_y_continuous(trans = "log2", breaks = c(-5, 0.01, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10)) +
+  scale_x_continuous(limits = c(-0.3, 0.3)) +
+  theme_bw() +
+  labs(x = "Coefficients for Predicting First Quarter Calls", y = "Uses per Answer") +
+  theme(legend.position = "none",
+        axis.title = element_text(size = 15),
+        axis.text = element_text(size = 15))
+```
+
+**Question 13:**
+
+```{r}
+# Multinomial model
+multinomial_model<-glmnet::cv.glmnet(x=merged_data_train_dfm, 
+                                      y=merged_data_train$FQ,
+                                      family = "multinomial", 
+                                      type.measure = "class")
+
+predictions <- predict(multinomial_model, newx = merged_data_test_dfm, s="lambda.min")
+predictions <- as.data.frame(predictions)
+
+# Define column names as 1, 2, 3, 4
+colnames(predictions) <- c("1", "2", "3", "4")
+
+# Add a new column for the class with the highest probability
+predictions$Max_Prob_Class <- max.col(predictions)
+predictions$True_Class <- merged_data_test$FQ
+conf_matrix <- table(predictions$True_Class,predictions$Max_Prob_Class)
+print(conf_matrix)
+
+predictions$Binary_Max_Prob_Class <- ifelse(predictions$Max_Prob_Class == 1, 1, 0)
+accuracy_2<-kendall_acc(predictions$Binary_Max_Prob_Class,merged_data_test$FQ_binary)
+accuracy_2
+
+# Accuracy Plot
+final_plot <- bind_rows(
+  accuracy_2 %>% mutate(field = "Multinomial Model"),
+  accuracy_1 %>% mutate(field = "Lasso Model")) %>%
+  ggplot(aes(x=field,color=field,y=acc,ymin=lower,ymax=upper)) +
+  geom_point() +
+  geom_errorbar(width=.4) +
+  theme_bw() +
+  labs(x="Model",y="Accuracy") +
+  geom_hline(yintercept = 50, linetype = "dashed") +
+  ggtitle("Accuracy of Lasso and Multinomial Model") +
+  theme(axis.text = element_text(size=8),
+        axis.title = element_text(size=10),
+        panel.grid=element_blank(),
+        legend.position="none",
+        plot.title = element_text(hjust = 0.5)) +
+  scale_y_continuous(breaks = seq(40, 75, by = 5), limits = c(47, 60))
+
+final_plot
+```
+
+*PART B*
+
+```{r, fig.width=12, fig.height=5}
+#### Calculate EPS surprise
+# Percentage change in earnings from before to after the announcement
+ecMain$EPS_surprise <- ((ecMain$EPS_actual - ecMain$EPS_consens) / abs(ecMain$EPS_actual)) * 100
+
+# Create a new column to indicate whether EPS_surprise is negative or positive
+ecMain$EPS_surprise_sign <- ifelse(ecMain$EPS_surprise < 0, "Negative", "Positive")
+
+# Split the dataset into two based on EPS_surprise_sign
+ecMain_negative <- ecMain[ecMain$EPS_surprise_sign == "Negative", ] #3000 obs
+ecMain_positive <- ecMain[ecMain$EPS_surprise_sign == "Positive", ] #7800 obs
+
+# Split data into training and test sets
+training_data_pos <- ecMain_positive %>%
+  filter(FY < 2012)
+test_data_pos <- ecMain_positive %>%
+  filter(FY == 2012)
+
+training_data_neg <- ecMain_negative %>%
+  filter(FY < 2012)
+test_data_neg <- ecMain_negative %>%
+  filter(FY == 2012)
+
+# LASSO models using unigrams
+dfm_train_pos<-TAB_dfm(training_data_pos$opening_speech,ngrams=1)
+dfm_test_pos<-TAB_dfm(test_data_pos$opening_speech, ngrams=1, min.prop = 0) %>%
+  dfm_match(colnames(dfm_train_pos))
+
+dfm_train_neg<-TAB_dfm(training_data_neg$opening_speech,ngrams=1)
+dfm_test_neg<-TAB_dfm(test_data_neg$opening_speech, ngrams=1, min.prop = 0) %>%
+  dfm_match(colnames(dfm_train_neg))
+
+saveRDS(dfm_train_pos, "function_dfm_train_pos.rds")
+saveRDS(dfm_test_pos, "function_dfm_test_pos.rds")
+saveRDS(dfm_train_neg, "function_dfm_train_neg.rds")
+saveRDS(dfm_test_neg, "function_dfm_test_neg.rds")
+
+#### Topic model
+set.seed(02138)
+
+# Train a 7-topic model for positive EPS_surprise
+pos_topicMod7<-stm(dfm_train_pos,K=7)
+topicNumpos=pos_topicMod7$settings$dim$K
+topicNamespos<-paste0("Topic",1:topicNumpos)
+saveRDS(pos_topicMod7, "function_pos_topicMod7.rds")
+
+# Add names to the vector
+topicNamespos[1]="Banking: "
+topicNamespos[2]="Automotive: "
+topicNamespos[3]="Consulting: "
+topicNamespos[4]="Oil & Gas: "
+topicNamespos[5]="Retail: "
+topicNamespos[6]="Technology: "
+topicNamespos[7]="Healthcare: "
+
+# Most common topics, and most common words from each topic
+plot(pos_topicMod7,type="summary", n=7, xlim=c(0,.3), labeltype = "frex", topic.names = topicNamespos)
+
+# Train a 7-topic model for negative EPS_surprise
+neg_topicMod7<-stm(dfm_train_neg,K=7)
+topicNumneg=neg_topicMod7$settings$dim$K
+topicNamesneg<-paste0("Topic",1:topicNumneg)
+saveRDS(neg_topicMod7, "function_neg_topicMod7.rds")
+
+# Add names to the vector
+topicNamesneg[1]="Oil & Gas: "
+topicNamesneg[2]="Real Estate: "
+topicNamesneg[3]="Consulting: "
+topicNamesneg[4]="Financial: "
+topicNamesneg[5]="Banking: "
+topicNamesneg[6]="Healthcare: "
+topicNamesneg[7]="Energy: "
+
+plot(neg_topicMod7,type="summary", n=7, xlim=c(0,.3), labeltype = "frex", topic.names = topicNamesneg)
+
+# Cloud for the second topic in negative EPS_surprise topic model
+cloud(neg_topicMod7,2)
+```
+
