@@ -2,4 +2,4 @@ The project aimed to analyze quarterly earnings calls, focusing on the company's
 
 code.Rmd contains the different models and code
 
-report.pdf contains the interpretation and business implications
+Final Report.pdf contains the interpretation and business implications
